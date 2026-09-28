@@ -14,7 +14,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-// DATABASE PRODUK DEFAULT
+// DATABASE PRODUK DEFAULT (BASLOK DISET 1 PCS = 1 STOK)
 const DEFAULT_DATABASE_PRODUK = {
   "1": { nama: "Cup Besar", harga: 5000, kategori: "teh", stokKebutuhan: { cupBesar: 1 } },
   "2": { nama: "Cup Besar + Creamer", harga: 7000, kategori: "teh", stokKebutuhan: { cupBesar: 1, creamer: 1 } },
@@ -25,7 +25,7 @@ const DEFAULT_DATABASE_PRODUK = {
   "7": { nama: "Jajanan", harga: 1000, kategori: "kopi_jajanan", stokKebutuhan: {} },
   "8": { nama: "Dancow", harga: 7000, kategori: "kopi_jajanan", stokKebutuhan: {} },
   "9": { nama: "Good Day", harga: 7000, kategori: "kopi_jajanan", stokKebutuhan: {} },
-  "baslok_pcs": { nama: "Baslok", harga: 1000, kategori: "baslok", stokKebutuhan: { baslokPorsi: 0.5 } }
+  "baslok_pcs": { nama: "Baslok", harga: 1000, kategori: "baslok", stokKebutuhan: { baslokPorsi: 1 } }
 };
 
 let DATABASES_PRODUK = {};
@@ -74,6 +74,10 @@ function muatStateDariStorage() {
     const data = snapshot.val();
     if (data) {
       DATABASES_PRODUK = data;
+      // Memastikan item baslok_pcs di Firebase terupdate stokKebutuhan-nya ke 1
+      if (DATABASES_PRODUK["baslok_pcs"]) {
+        DATABASES_PRODUK["baslok_pcs"].stokKebutuhan = { baslokPorsi: 1 };
+      }
     } else {
       DATABASES_PRODUK = { ...DEFAULT_DATABASE_PRODUK };
       simpanProduk();
@@ -177,7 +181,7 @@ function simpanProdukBaru(e) {
     nama: nama,
     harga: harga,
     kategori: kategori,
-    stokKebutuhan: kategori === "baslok" ? { baslokPorsi: 0.5 } : {}
+    stokKebutuhan: kategori === "baslok" ? { baslokPorsi: 1 } : {}
   };
 
   simpanProduk();
@@ -301,6 +305,296 @@ function renderKeranjangBaslok() {
         <span class="cart-item-subtotal">@Rp ${item.harga.toLocaleString()} = Rp ${subtotal.toLocaleString()}</span>
       </div>
       <div class="cart-qty-control">
+        <button class="cart-qty-btn" type="button" onclick="ubahQtyKeranjangBaslok('${id}', -1)">-</button>
+        <span class="cart-qty-num">${qty}</span>
+        <button class="cart-qty-btn" type="button" onclick="ubahQtyKeranjangBaslok('${id}', 1)">+</button>
+      </div>
+    `;
+    container.appendChild(div);
+  });
+
+  totalEl.innerText = `Rp ${grandTotal.toLocaleString()}`;
+  btnSubmit.disabled = false;
+}
+
+// CHECKOUT KASIR UTAMA
+function prosesCheckoutKeranjang(e) {
+  e.preventDefault();
+  const keys = Object.keys(keranjang);
+  if (keys.length === 0) return;
+
+  const totalKebutuhanStok = {};
+  for (const idProduk of keys) {
+    const item = DATABASES_PRODUK[idProduk];
+    if (item && item.stokKebutuhan) {
+      const qty = keranjang[idProduk];
+      for (const [bahan, butuh] of Object.entries(item.stokKebutuhan)) {
+        totalKebutuhanStok[bahan] = (totalKebutuhanStok[bahan] || 0) + (butuh * qty);
+      }
+    }
+  }
+
+  for (const [bahan, butuh] of Object.entries(totalKebutuhanStok)) {
+    const sisaStok = appState.stok[bahan] || 0;
+    if (sisaStok < butuh) {
+      alert(`Transaksi Gagal! Stok [ ${bahan.toUpperCase()} ] tidak cukup.\n(Dibutuhkan: ${butuh}, Tersedia: ${sisaStok})`);
+      return;
+    }
+  }
+
+  const metode = document.getElementById("metode-bayar").value;
+  const namaPembeli = document.getElementById("nama-pembeli").value;
+  const now = new Date();
+
+  keys.forEach(idProduk => {
+    const item = DATABASES_PRODUK[idProduk];
+    if (!item) return;
+
+    const qty = keranjang[idProduk];
+    const total = item.harga * qty;
+
+    if (item.stokKebutuhan) {
+      for (const [bahan, butuh] of Object.entries(item.stokKebutuhan)) {
+        if (appState.stok[bahan] !== undefined) {
+          appState.stok[bahan] -= (butuh * qty);
+        }
+      }
+    }
+
+    const dataTransaksi = {
+      id: Date.now() + Math.random(),
+      waktu: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      jamAngka: now.getHours(),
+      tipe: "penjualan",
+      kategori: item.kategori,
+      detail: `${item.nama} x${qty} ${metode === 'Utang' && namaPembeli ? '(' + namaPembeli + ')' : ''}`,
+      total: total,
+      metode: metode,
+      statusUtang: metode === "Utang" ? "Belum Lunas" : "N/A",
+      stokDikurangi: item.stokKebutuhan ? JSON.parse(JSON.stringify(item.stokKebutuhan)) : {},
+      qty: qty
+    };
+
+    appState.transaksi.unshift(dataTransaksi);
+  });
+
+  keranjang = {};
+  simpanState();
+  renderKeranjang();
+
+  document.getElementById("form-checkout").reset();
+  document.getElementById("group-nama-pembeli").style.display = "none";
+  alert("Transaksi berhasil diproses!");
+}
+
+// CHECKOUT BASLOK (1 PCS = 1 STOK)
+function prosesCheckoutBaslok(e) {
+  e.preventDefault();
+  const keys = Object.keys(keranjangBaslok);
+  if (keys.length === 0) return;
+
+  // 1. Cek Kebutuhan Stok Baslok (1 Pcs = 1 Stok)
+  let butuhBaslok = 0;
+  keys.forEach(idProduk => {
+    const item = DATABASES_PRODUK[idProduk] || { stokKebutuhan: { baslokPorsi: 1 } };
+    const qty = keranjangBaslok[idProduk];
+    const faktorStok = (item.stokKebutuhan && item.stokKebutuhan.baslokPorsi !== undefined) ? item.stokKebutuhan.baslokPorsi : 1;
+    butuhBaslok += faktorStok * qty;
+  });
+
+  // 2. Blokir Jika Stok Baslok Habis
+  const sisaStokBaslok = appState.stok.baslokPorsi || 0;
+  if (sisaStokBaslok < butuhBaslok) {
+    alert(`Transaksi Baslok Gagal! Stok Baslok tidak cukup.\n(Dibutuhkan: ${butuhBaslok} Pcs, Tersedia: ${sisaStokBaslok} Pcs)`);
+    return;
+  }
+
+  // 3. Proses Transaksi
+  const metode = document.getElementById("metode-bayar-baslok").value;
+  const namaPembeli = document.getElementById("nama-pembeli-baslok").value;
+  const now = new Date();
+
+  keys.forEach(idProduk => {
+    const item = DATABASES_PRODUK[idProduk] || { nama: "Baslok", harga: 1000, stokKebutuhan: { baslokPorsi: 1 } };
+    const qty = keranjangBaslok[idProduk];
+    const total = item.harga * qty;
+
+    const stokButuhObj = item.stokKebutuhan || { baslokPorsi: 1 };
+    for (const [bahan, butuh] of Object.entries(stokButuhObj)) {
+      if (appState.stok[bahan] !== undefined) {
+        appState.stok[bahan] -= (butuh * qty);
+      }
+    }
+
+    const dataTransaksi = {
+      id: Date.now() + Math.random(),
+      waktu: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      jamAngka: now.getHours(),
+      tipe: "penjualan",
+      kategori: "baslok",
+      detail: `Baslok ${qty} Pcs ${metode === 'Utang' && namaPembeli ? '(' + namaPembeli + ')' : ''}`,
+      total: total,
+      metode: metode,
+      statusUtang: metode === "Utang" ? "Belum Lunas" : "N/A",
+      stokDikurangi: JSON.parse(JSON.stringify(stokButuhObj)),
+      qty: qty
+    };
+
+    appState.transaksi.unshift(dataTransaksi);
+  });
+
+  keranjangBaslok = {};
+  simpanState();
+  renderKeranjangBaslok();
+
+  document.getElementById("group-nama-baslok").style.display = "none";
+  alert("Transaksi Baslok berhasil diproses!");
+}
+
+// PENGELUARAN KAS
+function prosesPengeluaran(e) {
+  e.preventDefault();
+  const ket = document.getElementById("ket-pengeluaran").value;
+  const nominal = parseInt(document.getElementById("nominal-pengeluaran").value);
+  const now = new Date();
+
+  const dataTransaksi = {
+    id: Date.now(),
+    waktu: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    jamAngka: now.getHours(),
+    tipe: "pengeluaran",
+    kategori: "pengeluaran",
+    detail: ket,
+    total: nominal,
+    metode: "Pengeluaran",
+    statusUtang: "N/A",
+    stokDikurangi: null,
+    qty: 0
+  };
+
+  appState.transaksi.unshift(dataTransaksi);
+  simpanState();
+  document.getElementById("form-pengeluaran").reset();
+}
+
+// HAPUS TRANSAKSI (PENGEMBALIAN STOK AKURAT)
+function hapusTransaksi(id) {
+  const index = appState.transaksi.findIndex(x => x.id === id);
+  if (index === -1) return;
+
+  const itemTerhapus = appState.transaksi[index];
+
+  if (confirm(`Hapus transaksi "${itemTerhapus.detail}"?`)) {
+    if (itemTerhapus.tipe === "penjualan" && itemTerhapus.stokDikurangi) {
+      const qty = itemTerhapus.qty || 1;
+      for (const [bahan, butuh] of Object.entries(itemTerhapus.stokDikurangi)) {
+        if (appState.stok[bahan] !== undefined) {
+          appState.stok[bahan] = (appState.stok[bahan] || 0) + (butuh * qty);
+        }
+      }
+    }
+
+    appState.transaksi.splice(index, 1);
+    simpanState();
+  }
+}
+
+// SET DEPOSIT AWAL
+function setDepositAwal() {
+  const val = parseInt(document.getElementById("input-deposit-awal").value) || 0;
+  appState.depositAwal = val;
+  simpanState();
+  alert("Modal / Deposit Awal berhasil disimpan!");
+}
+
+// STOK MANUAL
+function ubahStok(key, delta) {
+  if (appState.stok[key] !== undefined) {
+    appState.stok[key] = Math.max(0, appState.stok[key] + delta);
+    simpanState();
+  }
+}
+
+function bukaModalEditStok(key) {
+  targetEditStokKey = key;
+  document.getElementById("label-modal-stok").innerText = `Edit Stok: ${key.toUpperCase()}`;
+  document.getElementById("input-stok-manual").value = appState.stok[key];
+  document.getElementById("modal-edit-stok").style.display = "flex";
+}
+
+function tutupModalStok() {
+  document.getElementById("modal-edit-stok").style.display = "none";
+}
+
+function simpanStokManual() {
+  const val = parseInt(document.getElementById("input-stok-manual").value) || 0;
+  if (targetEditStokKey) {
+    appState.stok[targetEditStokKey] = val;
+    simpanState();
+  }
+  tutupModalStok();
+}
+
+// LUNASI UTANG
+function lunasiUtang(id) {
+  const t = appState.transaksi.find(x => x.id === id);
+  if (t) {
+    t.statusUtang = "Lunas";
+    simpanState();
+  }
+}
+
+// RENDER DASHBOARD & TABEL
+function renderSemua() {
+  renderGridMenu();
+  renderGridMenuBaslok();
+
+  const inputDeposit = document.getElementById("input-deposit-awal");
+  if (inputDeposit) inputDeposit.value = appState.depositAwal;
+
+  let totalTeh = 0;
+  let totalTehTunai = 0;
+  let totalKopiJajanan = 0;
+  let totalBaslok = 0;
+  let totalBaslokTunai = 0;
+  let totalPengeluaran = 0;
+
+  if (appState.transaksi) {
+    appState.transaksi.forEach(t => {
+      if (t.tipe === "penjualan") {
+        if (t.kategori === "teh") {
+          totalTeh += t.total;
+          if (t.metode === "Tunai" || t.statusUtang === "Lunas") totalTehTunai += t.total;
+        } else if (t.kategori === "kopi_jajanan") {
+          totalKopiJajanan += t.total;
+        } else if (t.kategori === "baslok") {
+          totalBaslok += t.total;
+          if (t.metode === "Tunai" || t.statusUtang === "Lunas") totalBaslokTunai += t.total;
+        }
+      } else if (t.tipe === "pengeluaran") {
+        totalPengeluaran += t.total;
+      }
+    });
+  }
+
+  const kasAkhirTeh = appState.depositAwal + totalTehTunai - totalPengeluaran;
+
+  if (document.getElementById("val-kas-teh")) document.getElementById("val-kas-teh").innerText = `Rp ${kasAkhirTeh.toLocaleString()}`;
+  if (document.getElementById("val-kopi-jajanan")) document.getElementById("val-kopi-jajanan").innerText = `Rp ${totalKopiJajanan.toLocaleString()}`;
+  if (document.getElementById("val-total-teh")) document.getElementById("val-total-teh").innerText = `Rp ${totalTeh.toLocaleString()}`;
+  if (document.getElementById("val-total-pengeluaran")) document.getElementById("val-total-pengeluaran").innerText = `Rp ${totalPengeluaran.toLocaleString()}`;
+
+  if (document.getElementById("val-total-baslok")) document.getElementById("val-total-baslok").innerText = `Rp ${totalBaslok.toLocaleString()}`;
+  if (document.getElementById("val-kas-baslok")) document.getElementById("val-kas-baslok").innerText = `Rp ${totalBaslokTunai.toLocaleString()}`;
+
+  if (appState.stok) {
+    for (const [key, value] of Object.entries(appState.stok)) {
+      const el = document.getElementById(`stok-val-${key}`);
+      if (el) el.innerText = value;
+    }
+  }
+
+  const renderTabelKe   <div class="cart-qty-control">
         <button class="cart-qty-btn" type="button" onclick="ubahQtyKeranjangBaslok('${id}', -1)">-</button>
         <span class="cart-qty-num">${qty}</span>
         <button class="cart-qty-btn" type="button" onclick="ubahQtyKeranjangBaslok('${id}', 1)">+</button>
