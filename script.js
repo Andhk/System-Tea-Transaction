@@ -1,3 +1,4 @@
+
 // 1. KONFIGURASI FIREBASE
 const firebaseConfig = {
   apiKey: "AIzaSyDLGsOh2xBu9M553rSjuKp9xyA1OQKva8U",
