@@ -1,12 +1,12 @@
 // 1. KONFIGURASI FIREBASE
 const firebaseConfig = {
-  apiKey: "AIzaSyDLgsOh2xBu9M553rSjuK...",
+  apiKey: "AIzaSyDLGsOh2xBu9M553rSjuKp9xyA1OQKva8U",
   authDomain: "teh-oplos.firebaseapp.com",
   databaseURL: "https://teh-oplos-default-rtdb.asia-southeast1.firebasedatabase.app",
   projectId: "teh-oplos",
-  storageBucket: "teh-oplos.appspot.com",
+  storageBucket: "teh-oplos.firebasestorage.app",
   messagingSenderId: "430811396745",
-  appId: "1:430811396745:web:3e0e86da...",
+  appId: "1:430811396745:web:3e0e86da936848cbc8e458",
   measurementId: "G-3FNRV2XVZ6"
 };
 
